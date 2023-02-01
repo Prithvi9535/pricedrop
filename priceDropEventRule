@@ -1,0 +1,112 @@
+let AWS = require('aws-sdk');
+var docClient = new AWS.DynamoDB.DocumentClient();
+
+function query_dynamo(params, callback, callbackFn) {
+    docClient.query(params, function(err, data) {
+        if (err) {
+            callback(new Error(err));
+        }
+        else {
+            if (typeof callbackFn === 'function') {
+                callbackFn(data);
+            }
+        }
+    });
+}
+
+function update_dynamo(params, callback, callbackFn) {
+    docClient.update(params, function(err, data) {
+        if (err) {
+            console.log(params);
+            callback(new Error(err));
+        }
+        else {
+            if (typeof callbackFn === 'function') {
+                callbackFn(data);
+            }
+        }
+    });
+}
+
+exports.handler = (event, context, callback) => {
+    console.log(event);
+    let checkIfPostsHaveExpiredParams = {
+        TableName: 'price_drop_posts',
+        IndexName: 'post_status-post_expire_time-index',
+        KeyConditionExpression: '#post_status = :post_status AND post_expire_time < :post_expire_time',
+        ExpressionAttributeNames: { '#post_status': 'post_status' },
+        ExpressionAttributeValues: {
+            ':post_status': 'LIVE_NOW',
+            ':post_expire_time': Date.now()
+        },
+    };
+    query_dynamo(checkIfPostsHaveExpiredParams, callback, function(posts) {
+        if (posts.Items.length > 0) {
+            let promise_array = [];
+            for (let i = 0; i < posts.Items.length; i++) {
+                promise_array.push(new Promise((res, rej) => {
+                    let expirePostParams = {
+                        TableName: 'price_drop_posts',
+                        Key: {
+                            post_id: posts.Items[i].post_id,
+                        },
+                        UpdateExpression: "SET post_status = :post_status",
+                        ExpressionAttributeValues: {
+                            ':post_status': 'EXPIRED'
+                        },
+                        ReturnValues: 'UPDATED_NEW',
+                    };
+                    update_dynamo(expirePostParams, callback, function(data) {
+                        let getAvailableCouponCodesOfPostParams = {
+                            TableName: 'price_drop_coupons',
+                            KeyConditionExpression: '#post_id = :post_id',
+                            FilterExpression: "coupon_status = :coupon_status",
+                            ExpressionAttributeNames: { '#post_id': 'post_id' },
+                            ExpressionAttributeValues: {
+                                ':post_id': posts.Items[i].post_id,
+                                ':coupon_status': 'AVAILABLE'
+                            },
+                        };
+                        query_dynamo(getAvailableCouponCodesOfPostParams, callback, function(coupons) {
+                            if (coupons.Items.length > 0) {
+                                let coupons_promise_array = [];
+                                for (let j = 0; j < coupons.Items.length; j++) {
+                                    coupons_promise_array.push(new Promise((coupon_res, coupon_rej) => {
+                                        let expireCouponParams = {
+                                            TableName: 'price_drop_coupons',
+                                            Key: {
+                                                post_id: posts.Items[i].post_id,
+                                                coupon_id: coupons.Items[j].coupon_id
+                                            },
+                                            UpdateExpression: "SET coupon_status = :coupon_status",
+                                            ExpressionAttributeValues: {
+                                                ':coupon_status': 'EXPIRED'
+                                            },
+                                            ReturnValues: 'UPDATED_NEW',
+                                        };
+                                        update_dynamo(expireCouponParams, callback, function(data) {
+                                            coupon_res(data);
+                                        });
+                                    }));
+                                }
+                                Promise.all(coupons_promise_array).then(data => {
+                                    res(data);
+                                });
+                            }
+                        });
+                    });
+                }));
+            }
+            Promise.all(promise_array).then((data) => {
+                callback(null, { StatusCode: 200 });
+            }).catch(err => {
+                console.log(err);
+                callback(null, { StatusCode: 200 });
+            });
+        }
+        else {
+            console.log("No Posts Have expired");
+            callback(null, { StatusCode: 200 });
+        }
+    });
+};
