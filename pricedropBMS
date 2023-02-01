@@ -1,0 +1,448 @@
+let AWS = require('aws-sdk');
+var docClient = new AWS.DynamoDB.DocumentClient();
+var cognitoidentityserviceprovider = new AWS.CognitoIdentityServiceProvider({ apiVersion: '2016-04-18' });
+var uuid = require("uuid");
+//var constants = require('constants.json');
+
+//Dynamo Functions
+function query_dynamo(params, callback, callbackFn) {
+    docClient.query(params, function(err, data) {
+        if (err) {
+            callback(new Error(err));
+        }
+        else {
+            if (typeof callbackFn === 'function') {
+                callbackFn(data);
+            }
+        }
+    });
+}
+
+function insert_dynamo(params, callback, callbackFn) {
+    docClient.put(params, function(err, data) {
+        if (err) {
+            callback(new Error(err));
+        }
+        else {
+            if (typeof callbackFn === 'function') {
+                callbackFn(data);
+            }
+        }
+    });
+}
+
+function update_dynamo(params, callback, callbackFn) {
+    docClient.update(params, function(err, data) {
+        if (err) {
+            callback(new Error(err));
+        }
+        else {
+            if (typeof callbackFn === 'function') {
+                callbackFn(data);
+            }
+        }
+    });
+}
+
+function scan_dynamo(params, callback, callbackFn) {
+    docClient.scan(params, function(err, data) {
+        if (err) {
+            callback(new Error(err));
+        }
+        else {
+            if (typeof callbackFn === 'function') {
+                callbackFn(data);
+            }
+        }
+    });
+}
+
+function delete_dynamo(params, callback, callbackFn) {
+    docClient.delete(params, function(err, data) {
+        if (err) {
+            callback(new Error(err));
+        }
+        else {
+            if (typeof callbackFn === 'function') {
+                callbackFn(data);
+            }
+        }
+    });
+}
+
+
+function queryDynamo(params, callback, callbackFn) {
+    docClient.query(params, function(err, data) {
+        if (err) {
+            callback(new Error(err));
+        }
+        else {
+            if (typeof callbackFn === 'function') {
+                callbackFn(data);
+            }
+        }
+    });
+}
+
+function delete_cognito_user(user_email_id, pool_id, callback, callbackFn) {
+    let checkCognitoUserPresentOrNot = {
+        UserPoolId: pool_id,
+        Username: user_email_id.trim(),
+    };
+    cognitoidentityserviceprovider.adminDeleteUser(checkCognitoUserPresentOrNot, function(err, data) {
+        if (!err) {
+            callbackFn(data);
+        }
+        else {
+            callback(new Error('Unable to delete Cognito Account with Email_ID : ' + user_email_id.toLowerCase()));
+        }
+    });
+}
+
+
+function create_cognito_user(email_id, poolId, callback, callbackFn) {
+    let params = {
+        UserPoolId: poolId,
+        Username: email_id.trim().toLowerCase(),
+        UserAttributes: [{
+                Name: 'email',
+                Value: email_id.trim().toLowerCase(),
+            },
+            {
+                Name: 'email_verified',
+                Value: 'true',
+            },
+        ],
+        TemporaryPassword: (+Date.now()).toString(32),
+    };
+    cognitoidentityserviceprovider.adminCreateUser(params, function(err, data) {
+        if (!err) {
+            callbackFn(data);
+        }
+        else {
+            // logErrorMsg(err, params, null, callback, function(data) {
+            callback(new Error('Unable to create Cognito Account with Email_ID : ' + email_id.toLowerCase()));
+            // });
+        }
+    });
+}
+
+
+//BMS USER MANAGEMENT
+function create_user(event, context, callback) {
+    if (event.user_email_id.trim().length > 0 && event.user_name.trim().length > 0) {
+        let checkIfUserExists = {
+            TableName: "price_drop_nested_sam",
+            IndexName: "user_email_id-index",
+            KeyConditionExpression: "#user_email_id = :user_email_id",
+            ExpressionAttributeNames: {
+                "#user_email_id": "user_email_id",
+            },
+            ExpressionAttributeValues: {
+                ":user_email_id": event.user_email_id.trim().toLowerCase()
+            }
+        };
+        query_dynamo(checkIfUserExists, callback, function(user) {
+            if (user.Count == 0) {
+                create_cognito_user(event.user_email_id.trim().toLowerCase(), constants.BmsCognitoPool, callback, function(data) {
+                    let newBMSUser = {
+                        Item: {
+                            "user_id": uuid.v4(),
+                            "user_name": event.user_name,
+                            "user_email_id": event.user_email_id.trim().toLowerCase(),
+                            "user_created_on": new Date().getTime()
+                        },
+                        TableName: "price_drop_nested_sam",
+                        ConditionExpression: "attribute_not_exists(user_id)",
+                        ReturnValues: "ALL_OLD"
+                    };
+                    insert_dynamo(newBMSUser, callback, function(data) {
+                        callback(null, { status: 'Success', Status_Message: "Created BMS User With Email_ID " + event.user_email_id.trim().toLowerCase() + " Successfully" });
+                    });
+                });
+            }
+            else {
+                callback(new Error("BMS User With Email :" + event.user_email_id + " Already Exists"));
+            }
+        });
+    }
+    else {
+        callback(new Error("Kindly Enter User Email ID And Name To Create User"));
+    }
+}
+
+function list_users(event, context, callback) {
+    let getUsers = {
+        TableName: 'price_drop_nested_sam',
+        ScanIndexForward: false,
+        Limit: 100,
+    };
+    scan_dynamo(getUsers, callback, function(data) {
+        if (data.Count > 0) {
+            let response = {};
+            response.items = data.Items;
+            if (data.LastEvaluatedKey != undefined && data.LastEvaluatedKey != null) {}
+            callback(null, {
+                status: 'SUCCESS',
+                data: response,
+            });
+        }
+        else {
+            callback(new Error('Currently there are No Users Created'));
+        }
+    });
+}
+
+function update_user(event, context, callback) {
+    if (event.user_id != undefined && event.user_id.trim().length > 0) {
+        let getUserDetailsParams = {
+            TableName: "price_drop_nested_sam",
+            KeyConditionExpression: "user_id = :user_id",
+            FilterExpression: "user_status = :user_status",
+            ExpressionAttributeValues: {
+                ":user_id": event.user_id,
+                ":user_status": "ACTIVE"
+            }
+        };
+        query_dynamo(getUserDetailsParams, callback, function(data) {
+            if (data.Count > 0) {
+                let params = {
+                    TableName: "price_drop_nested_sam",
+                    Key: {
+                        "user_id": event.user_id
+                    },
+                    UpdateExpression: "SET user_name = :user_name",
+                    ExpressionAttributeValues: {
+                        ":user_name": event.user_name
+                    },
+                };
+                update_dynamo(params, callback, function(data) {
+                    callback(null, { status: "SUCCESS", status_message: "User Update Successfully" });
+                });
+            }
+            else {
+                callback(new Error("user Not Found!"));
+            }
+        });
+    }
+    else {
+        callback(new Error("Kindly! Enter User ID To be Updated"));
+    }
+}
+
+function delete_user(event, context, callback) {
+    if (event.user_id != undefined && event.user_id.trim().length > 0) {
+        let getUserDetailsParams = {
+            TableName: "price_drop_nested_sam",
+            KeyConditionExpression: "user_id = :user_id",
+            ExpressionAttributeValues: {
+                ":user_id": event.user_id,
+            }
+        };
+        query_dynamo(getUserDetailsParams, callback, (data) => {
+            if (data.Count > 0) {
+                console.log(data);
+                let deleteUserParams = {
+                    TableName: 'price_drop_nested_sam',
+                    Key: {
+                        user_id: event.user_id,
+                    },
+                };
+                delete_dynamo(deleteUserParams, callback, function(data) {
+                    callback(null, { status: "SUCCESS", status_message: "User deleted Successfully" });
+                });
+            }
+            else {
+                callback(new Error("Student Not Found!"));
+            }
+        });
+    }
+    else {
+        callback(new Error("Kindly! Enter User ID To be Updated"));
+    }
+}
+
+function list_bms_users(event, context, callback) {
+    let getCoupon = {
+        TableName: 'price_drop_nested_sam',
+        ScanIndexForward: false,
+        Limit: 100,
+    };
+    scan_dynamo(getCoupon, callback, function(data) {
+        if (data.Count > 0) {
+            let response = {};
+            response.items = data.Items;
+            if (data.LastEvaluatedKey != undefined && data.LastEvaluatedKey != null) {}
+            callback(null, {
+                status: 'SUCCESS',
+                data: response,
+            });
+        }
+        else {
+            callback(new Error('Currently there are No coupon'));
+        }
+    });
+}
+
+function list_buyers_sellers(event, context, callback) {
+    let getCoupon = {
+        TableName: 'price_drop_user_nested',
+        ScanIndexForward: false,
+        Limit: 100,
+    };
+    scan_dynamo(getCoupon, callback, function(data) {
+        if (data.Count > 0) {
+            let response = {};
+            response.items = data.Items;
+            if (data.LastEvaluatedKey != undefined && data.LastEvaluatedKey != null) {}
+            callback(null, {
+                status: 'SUCCESS',
+                data: response,
+            });
+        }
+        else {
+            callback(new Error('Currently there are No coupon'));
+        }
+    });
+}
+
+function list_post(event, context, callback) {
+    let getCoupon = {
+        TableName: 'price_drop_posts',
+        ScanIndexForward: false,
+        Limit: 100,
+    };
+    scan_dynamo(getCoupon, callback, function(data) {
+        if (data.Count > 0) {
+            let response = {};
+            response.items = data.Items;
+            response.items = response.items.sort((a, b) => { b.post_createdon - a.post_createdon });
+            if (data.LastEvaluatedKey != undefined && data.LastEvaluatedKey != null) {}
+            callback(null, {
+                status: 'SUCCESS',
+                data: response,
+            });
+        }
+        else {
+            callback(new Error('Currently there are No coupon'));
+        }
+    });
+}
+
+function list_post_status(event, context, callback) {
+    let checkPostStatusLive = {
+        TableName: 'price_drop_posts_nested',
+        IndexName: 'post_status-post_expire_time-index',
+        KeyConditionExpression: "post_status = :post_status",
+        ExpressionAttributeValues: {
+            ':post_status': event.post_status
+        }
+    };
+    queryDynamo(checkPostStatusLive, callback, function(data) {
+        if (data.Count > 0) {
+            let response = {};
+            response.items = data.Items;
+            if (data.LastEvaluatedKey != undefined && data.LastEvaluatedKey != null) {}
+            callback(null, {
+                status: 'SUCCESS',
+                data: response,
+            });
+        }
+        else {
+            callback(new Error('post_status: ' + event.post_status + ' not found'));
+        }
+    });
+}
+
+function update_kyb_users(event, context, callback) {
+    if (event.user_phone_number.trim().length > 0) {
+        let checkIfUserExists = {
+            TableName: "price_drop_user_nested",
+            IndexName: "user_phone_number-index",
+            KeyConditionExpression: "#user_phone_number = :user_phone_number",
+            ExpressionAttributeNames: {
+                "#user_phone_number": "user_phone_number",
+            },
+            ExpressionAttributeValues: {
+                ":user_phone_number": event.user_phone_number
+            }
+        };
+        queryDynamo(checkIfUserExists, callback, function(user) {
+            if (user.Items.length > 0) {
+                let UpdateExpression = 'set';
+                let ExpressionAttributeNames = {};
+                let ExpressionAttributeValues = {};
+                for (const field in event) {
+                    if (field == 'email_id' || field == 'images' || field == 'location_details' || field == 'identity_proof'  || field == 'user_type' ) {
+                        UpdateExpression += ` #${field} = :${field} ,`;
+                        ExpressionAttributeNames['#' + field] = field;
+                        ExpressionAttributeValues[':' + field] = event[field];
+                    }
+                }
+                UpdateExpression = UpdateExpression + 'user_type = :user_type,';
+                ExpressionAttributeValues[':user_type'] = 'BUSINESS';
+                if (UpdateExpression != 'set') {
+                    UpdateExpression = UpdateExpression.slice(0, -1);
+                    let updateInternalUserParams = {
+                        TableName: 'kyb_users',
+                        Key: {
+                            user_id: user.Items[0].user_id,
+                        },
+                        UpdateExpression: UpdateExpression,
+                        ExpressionAttributeNames: ExpressionAttributeNames,
+                        ExpressionAttributeValues: ExpressionAttributeValues,
+                        ReturnValues: 'UPDATED_NEW',
+                    };
+                    update_dynamo(updateInternalUserParams, callback, function(data) {
+                        callback(null, { status: 'Successfully', Status_Message: 'updated user details Successfully!!', data });
+                    });
+                }
+                else {
+                    callback(new Error('User with User ID: ' + event.user_id + ' cannot be updated'));
+                }
+            }
+            else {
+                callback(new Error("User With ID: " + event.user_id + " Not Found"));
+            }
+        });
+    }
+    else {
+        callback(new Error("Kindly Enter User Email ID And Name To Create User"));
+    }
+}
+
+
+exports.handler = (event, context, callback) => {
+    console.log(event);
+    switch (event.command) {
+        case 'createUser':
+            create_user(event, context, callback);
+            break;
+        case 'listUsers':
+            list_users(event, context, callback);
+            break;
+        case 'updateBmsUser':
+            update_user(event, context, callback);
+            break;
+        case 'deleteUser':
+            delete_user(event, context, callback);
+            break;
+        case 'listBmsUser':
+            list_bms_users(event, context, callback);
+            break;
+        case 'listBuyersAndSellers':
+            list_buyers_sellers(event, callback, callback);
+            break;
+        case "listPost":
+            list_post(event, context, callback);
+            break;
+        case "listPostStatus":
+            list_post_status(event, context, callback);
+            break;
+        case 'updateKybUser':
+            update_kyb_users(event, context, callback);
+            break;
+        default:
+            callback(new Error("Command not Found!"));
+    }
+};
